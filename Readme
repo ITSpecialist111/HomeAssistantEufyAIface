@@ -1,0 +1,170 @@
+Integrating Eufy Cameras with DeepStack for Person and Face Detection in Home Assistant
+Introduction
+Setting up a smart home security system with battery-operated cameras like Eufy can be a challenge, especially when these cameras lack RTSP (Real-Time Streaming Protocol) capabilities. Eufy cameras, while efficient in terms of power consumption, typically operate by capturing snapshots rather than streaming video continuously. This poses a significant hurdle for those looking to integrate advanced AI-driven functionalities, such as person detection and facial recognition, into their Home Assistant setup.
+
+This blog post will walk you through the integration process using Eufy cameras, DeepStack AI, and other critical Home Assistant integrations to create a functional, albeit imperfect, automation for person detection and facial recognition. The configuration discussed here leverages snapshots taken by the Eufy cameras, which are then analyzed by DeepStack for object and facial recognition. We'll also touch upon other relevant integrations like Frigate, Double Take, and OpenAI's LLM vision capabilities.
+
+The Challenge of Non-RTSP Cameras
+Non-RTSP cameras, such as battery-operated Eufy models, are designed to save energy by not streaming video continuously. Instead, they capture snapshots when motion is detected. While this is great for extending battery life, it introduces latency in AI-driven workflows, where immediate video feeds are ideal for real-time processing.
+
+The purpose of this setup is to leverage these snapshots for person and face detection using DeepStack, which is an AI-powered solution integrated into Home Assistant. However, be mindful that the snapshot timing may cause delays in detection, potentially leading to slower notifications or missed detections. Despite this limitation, the setup still offers a viable solution for enhancing home security.
+
+Required Integrations
+To achieve this setup, you'll need to install and configure the following integrations within Home Assistant:
+
+DeepStack: An AI server for object and facial recognition.
+DeepStack Integration for Home Assistant
+Eufy Security: Integration to connect Eufy cameras with Home Assistant.
+Eufy Security GitHub Integration
+Frigate: A complete NVR with real-time object detection.
+Frigate Integration for Home Assistant
+Double Take: Allows running multiple AI models for image processing, such as DeepStack.
+Double Take GitHub Integration
+LLM Vision: Leverages GPT-4 to analyze snapshots for detailed scene descriptions.
+OpenAI API Integration
+TTS (Text-to-Speech) Integrations:
+ElevenLabs Integration
+OpenAI TTS Integration
+Configuration Overview
+Below is a detailed YAML configuration used in Home Assistant for detecting persons and performing facial recognition using DeepStack. The automation is triggered by motion sensors on Eufy cameras, and the subsequent snapshots are processed by DeepStack.
+
+yaml
+Copy code
+### Automation #1: Identify and Notify Person Detection via DeepStack
+alias: Identify and Notify Person Detection via DeepStack
+description: Detect objects and faces using DeepStack when motion is detected.
+
+trigger:
+  - platform: state
+    entity_id:
+      - binary_sensor.rear_door_person_detected
+      - binary_sensor.driveway_person_detected
+      - binary_sensor.backyard_person_detected
+      - binary_sensor.front_door_person_detected
+    from: "off"
+    to: "on"
+
+condition:
+  - condition: template
+    value_template: "{{ camera_entity != 'None' }}"
+
+action:
+  - delay: "00:00:02" # Delay to allow snapshot capture
+  - data:
+      entity_id:
+        - image_processing.backyard_object_detection
+        - image_processing.driveway_object_detection
+        - image_processing.front_door_object_detection
+        - image_processing.rear_door_object_detection
+        - image_processing.face_counter
+    action: image_processing.scan # Trigger DeepStack processing
+
+  - wait_template: >
+      {{ not is_state('image_processing.backyard_object_detection', 'processing') and
+         not is_state('image_processing.driveway_object_detection', 'processing') and
+         not is_state('image_processing.front_door_object_detection', 'processing') and
+         not is_state('image_processing.rear_door_object_detection', 'processing') and
+         not is_state('image_processing.face_counter', 'processing') }}
+    timeout: "00:01:00" # Timeout if processing takes too long
+    continue_on_timeout: true
+
+  - data:
+      message: >
+        DeepStack Object Detection: {{
+        state_attr('image_processing.backyard_object_detection', 'summary') |
+        default('No objects detected') }}. DeepStack Face Detection: {{
+        state_attr('image_processing.backyard_object_detection_2',
+        'matched_faces') | default('No faces detected') }}.
+      data:
+        image: "{{ snapshot_url }}"
+    action: notify.notify # Send notification with detection results
+
+variables:
+  camera_entity: |
+    {% if trigger.entity_id == 'binary_sensor.rear_door_person_detected' %}
+      camera.rear_door
+    {% elif trigger.entity_id == 'binary_sensor.driveway_person_detected' %}
+      camera.driveway
+    {% elif trigger.entity_id == 'binary_sensor.backyard_person_detected' %}
+      camera.backyard
+    {% elif trigger.entity_id == 'binary_sensor.front_door_person_detected' %}
+      camera.front_door
+    {% else %}
+      None
+    {% endif %}
+
+  snapshot_url: >-
+    https://ha.yourdomain.com{{ state_attr(event_image_entity, 'entity_picture') }}
+This automation script is designed to identify persons via motion sensors and notify you with the results of the DeepStack object and face recognition. The delays and wait templates account for the latency inherent in using non-RTSP cameras.
+
+Extending with LLM Vision
+For more advanced scene analysis, you can incorporate LLM Vision. This setup involves using OpenAI's GPT-4 to describe the content of snapshots, which can include details like number plates or more nuanced scene descriptions.
+
+yaml
+Copy code
+### LLM Vision Automation: Describe Scene on Motion Detection
+alias: Describe Scene on Motion Detection
+description: >-
+  Trigger a snapshot, analyze it using LLM vision, and describe the scene
+  including number plates.
+
+trigger:
+  - platform: state
+    entity_id:
+      - binary_sensor.rear_door_motion_detected
+      - binary_sensor.driveway_motion_detected
+      - binary_sensor.backyard_motion_detected
+      - binary_sensor.front_door_motion_detected
+    from: "off"
+    to: "on"
+
+condition:
+  - condition: time
+    after: "07:00:00"
+    before: "20:00:00"
+
+action:
+  - data:
+      entity_id: >
+        {% if trigger.entity_id == 'binary_sensor.rear_door_motion_detected' %}
+          camera.rear_door
+        {% elif trigger.entity_id == 'binary_sensor.driveway_motion_detected' %}
+          camera.driveway
+        {% elif trigger.entity_id == 'binary_sensor.backyard_motion_detected' %}
+          camera.backyard
+        {% elif trigger.entity_id == 'binary_sensor.front_door_motion_detected' %}
+          camera.front_door
+        {% endif %}
+      filename: |
+        /config/www/snapshots/{{ trigger.entity_id.split('.')[1] }}_snapshot.jpg
+    action: camera.snapshot
+
+  - data:
+      provider: OpenAI
+      model: gpt-4o
+      message: Describe what you see?
+      image_file: |
+        /config/www/snapshots/{{ trigger.entity_id.split('.')[1] }}_snapshot.jpg
+    response_variable: llmvision_response
+    action: llmvision.image_analyzer
+
+  - wait_template: >-
+      {{ not is_state_attr('sensor.llmvision_response', 'status', 'analyzing') }}
+    timeout: "00:01:00"
+    continue_on_timeout: false
+
+  - data:
+      message: >
+        The scene has been analyzed. Description: {{
+        state_attr('sensor.llmvision_response', 'response_text') }}
+      data:
+        image: >
+          /config/www/snapshots/{{ trigger.entity_id.split('.')[1] }}_snapshot.jpg
+    action: notify.mobile_app_sm_f936b # Send notification with scene description
+This automation provides a more detailed description of the scene by leveraging the power of LLM Vision, which can be especially useful for detecting critical details that might not be immediately apparent.
+
+Final Thoughts and Moving Forward
+While the setup described above works, the inherent delay due to snapshot timing can be frustrating, especially when real-time processing is desired. As such, I've begun testing with Frigate, DeepStack, and Double Take integrations using newer RTSP-compatible cameras. These cameras provide continuous video streams, allowing for quicker and more accurate detections, thereby offering a more robust solution for home security automation.
+
+Despite the limitations, this guide demonstrates that it's possible to achieve AI-driven person detection and facial recognition with non-RTSP cameras. However, for those who prioritize speed and accuracy, investing in RTSP-compatible cameras will be worth considering.
+
